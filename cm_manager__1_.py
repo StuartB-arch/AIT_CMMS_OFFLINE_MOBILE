@@ -1563,15 +1563,21 @@ class AnalyticsView(tk.Frame):
     # ── 5. Pareto by Priority (Weekly YTD) ────────────────────────────────────
     def _render_p1_pareto(self, df, period):
         self._clear_tab("p1_pareto")
+        frm = self._tab_frames["p1_pareto"]
+
+        tk.Label(frm,
+                 text=f"  CM Frequency by Priority — Weekly YTD  |  {period}",
+                 bg=BG2, fg=ACCENT, font=FONT_HEADER,
+                 anchor="w").pack(fill="x", padx=8, pady=(6, 2))
 
         # Build YTD week spine: Mon Jan 1-week → current week
-        today         = pd.Timestamp.now().normalize()
-        jan1          = pd.Timestamp(f"{today.year}-01-01")
+        today          = pd.Timestamp.now().normalize()
+        jan1           = pd.Timestamp(f"{today.year}-01-01")
         week_start_jan = jan1 - pd.Timedelta(days=jan1.weekday())
-        week_starts   = pd.date_range(start=week_start_jan, end=today, freq="W-MON")
-        n_weeks       = len(week_starts)
-        week_labels   = [ws.strftime("Wk%U\n%b %d") for ws in week_starts]
-        x_pos         = np.arange(n_weeks)
+        week_starts    = pd.date_range(start=week_start_jan, end=today, freq="W-MON")
+        n_weeks        = len(week_starts)
+        week_labels    = [ws.strftime("Wk%U\n%b %d") for ws in week_starts]
+        x_pos          = np.arange(n_weeks)
 
         # Tag every CM with its week-start Monday
         df2 = df.copy()
@@ -1580,24 +1586,47 @@ class AnalyticsView(tk.Frame):
             lambda p: p.start_time.normalize() if pd.notna(p) else pd.NaT
         )
 
-        plt.style.use("dark_background")
-        import matplotlib.gridspec as mgridspec
+        # ── Scrollable container (vertical) ──────────────────────────────────
+        outer = tk.Frame(frm, bg=BG2)
+        outer.pack(fill="both", expand=True, padx=4, pady=4)
 
-        # 1×4 grid: all four priority charts horizontally across the page
-        fig_w = max(20, n_weeks * 0.55 * 4 + 4)
-        fig   = plt.figure(figsize=(fig_w, 5.5), facecolor=BG2)
-        fig.patch.set_facecolor(BG2)
-        gs = mgridspec.GridSpec(1, 4, figure=fig,
-                                hspace=0.0, wspace=0.35,
-                                left=0.04, right=0.98,
-                                top=0.88, bottom=0.20)
+        v_scroll = ttk.Scrollbar(outer, orient="vertical")
+        v_scroll.pack(side="right", fill="y")
+        scroll_cv = tk.Canvas(outer, bg=BG2, highlightthickness=0,
+                              yscrollcommand=v_scroll.set)
+        scroll_cv.pack(side="left", fill="both", expand=True)
+        v_scroll.config(command=scroll_cv.yview)
+
+        inner = tk.Frame(scroll_cv, bg=BG2)
+        inner_id = scroll_cv.create_window((0, 0), window=inner, anchor="nw")
+
+        scroll_cv.bind("<Configure>",
+                       lambda e: scroll_cv.itemconfig(inner_id, width=e.width))
+        inner.bind("<Configure>",
+                   lambda e: scroll_cv.configure(scrollregion=scroll_cv.bbox("all")))
+        scroll_cv.bind_all("<MouseWheel>",
+                           lambda e: scroll_cv.yview_scroll(-1 * (e.delta // 120), "units"))
+
+        # ── One full-width chart per priority ─────────────────────────────────
+        plt.style.use("dark_background")
+        fig_w = max(13, n_weeks * 0.72 + 2)
 
         for idx, p in enumerate(PRIO_ORDER):
-            ax     = fig.add_subplot(gs[0, idx])
-            sub    = df2[df2["criticality"] == p].copy()
             pcolor = PRIO_COLORS[p]
+            sub    = df2[df2["criticality"] == p].copy()
 
-            if not sub.empty:
+            fig, ax = plt.subplots(1, 1, figsize=(fig_w, 3.8), facecolor=BG2)
+            fig.patch.set_facecolor(BG2)
+            fig.subplots_adjust(left=0.05, right=0.98, top=0.85, bottom=0.22)
+
+            if sub.empty:
+                ax.set_facecolor(PLOT_BG)
+                ax.text(0.5, 0.5, f"No {p} CMs in period",
+                        transform=ax.transAxes, ha="center", va="center",
+                        color=TEXT_DIM, fontsize=12)
+                _style_ax(ax, f"{p} — Weekly CMs YTD  (SLA {SLA_TTR_LBL[p]})",
+                          ylabel="CM Count")
+            else:
                 weekly_counts = (
                     sub.groupby("week").size()
                     .reindex(week_starts)
@@ -1607,39 +1636,34 @@ class AnalyticsView(tk.Frame):
                 vals = weekly_counts.values
 
                 bars = ax.bar(x_pos, vals, color=pcolor, alpha=0.85, zorder=3, width=0.7)
-                _bar_labels(ax, bars, fmt="{:.0f}", color=TEXT, fontsize=6.5)
+                _bar_labels(ax, bars, fmt="{:.0f}", color=TEXT, fontsize=7)
 
                 ax.set_xticks(x_pos)
-                ax.set_xticklabels(week_labels, fontsize=6, rotation=45, ha="right")
+                ax.set_xticklabels(week_labels, fontsize=7, rotation=40, ha="right")
                 ax.set_xlim(-0.7, n_weeks - 0.3)
                 ax.set_ylim(0)
+                ax.grid(axis="y", color=GRID_C, linewidth=0.4, alpha=0.5, zorder=0)
 
                 ttr_sub = sub[sub["ttr_hrs"].notna() & (sub["ttr_hrs"] >= 0)]["ttr_hrs"]
                 if not ttr_sub.empty:
                     pct_ok  = (ttr_sub <= SLA_TTR[p]).sum() / len(ttr_sub) * 100
                     badge_c = SUCCESS if pct_ok >= 80 else ACCENT2 if pct_ok >= 50 else DANGER
-                    ax.text(0.02, 0.97,
-                            f"TTR {SLA_TTR_LBL[p]}  |  {pct_ok:.0f}% on-target  (n={len(ttr_sub)})",
-                            transform=ax.transAxes, ha="left", va="top", fontsize=6.5,
+                    ax.text(0.01, 0.97,
+                            f"TTR target {SLA_TTR_LBL[p]}  |  Within target: {pct_ok:.0f}%  (n={len(ttr_sub)})",
+                            transform=ax.transAxes, ha="left", va="top", fontsize=8.5,
                             color=badge_c,
-                            bbox=dict(facecolor=BG3, alpha=0.7, pad=2, edgecolor=badge_c))
-                ax.text(0.98, 0.97, f"{len(sub)} CMs",
+                            bbox=dict(facecolor=BG3, alpha=0.75, pad=3, edgecolor=badge_c))
+                ax.text(0.99, 0.97, f"{len(sub)} CMs total",
                         transform=ax.transAxes, ha="right", va="top",
                         fontsize=8, color=pcolor, fontweight="bold")
-            else:
-                ax.text(0.5, 0.5, f"No {p} CMs in period",
-                        transform=ax.transAxes, ha="center", va="center",
-                        color=TEXT_DIM, fontsize=10)
 
-            _style_ax(ax, f"{p} — Weekly CMs YTD  (SLA {SLA_TTR_LBL[p]})",
-                      ylabel="CM Count")
+                _style_ax(ax, f"{p} — Weekly CMs YTD  |  SLA {SLA_TTR_LBL[p]}  |  {period}",
+                          ylabel="CM Count")
 
-        fig.suptitle(f"CM Frequency by Priority — Weekly YTD  |  {period}",
-                     color=TEXT, fontsize=12, fontweight="bold")
-        self._figs["p1_pareto"] = fig
-        canvas = FigureCanvasTkAgg(fig, self._tab_frames["p1_pareto"])
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True)
+            self._figs[f"pareto_{p}"] = fig
+            cv = FigureCanvasTkAgg(fig, inner)
+            cv.draw()
+            cv.get_tk_widget().pack(fill="x", expand=False, pady=(0, 6))
 
 
     # ── 6. Recurring Disruptions ──────────────────────────────────────────────
