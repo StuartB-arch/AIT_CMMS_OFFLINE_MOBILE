@@ -1043,72 +1043,48 @@ class PMSchedulingService:
         self.priority_map = self._load_priority_assets()
 
     def _load_priority_assets(self) -> Dict[str, int]:
-        """Load priority assets from CSV files and create a BFM -> Priority mapping"""
+        """Load priority from PM_MASTER_2026_CLEANED.csv using the Priority Classification column."""
         priority_map = {}
-
-        # Define priority CSV files and their priority levels
-        priority_files = [
-            ('PM_LIST_A220_1.csv', 1),  # P1 assets
-            ('PM_LIST_A220_2.csv', 2),  # P2 assets
-            ('PM_LIST_A220_3.csv', 3),  # P3 assets
-        ]
+        _p_to_int = {'P1': 1, 'P2': 2, 'P3': 3, 'P4': 4}
 
         try:
-            # Get the directory where the script is located
-            # Use os.getcwd() as fallback if __file__ is not available
             try:
                 script_dir = os.path.dirname(os.path.abspath(__file__))
             except NameError:
                 script_dir = os.getcwd()
 
-            for filename, priority in priority_files:
-                filepath = os.path.join(script_dir, filename)
+            filepath = os.path.join(script_dir, 'PM_MASTER_2026_CLEANED.csv')
 
-                if not os.path.exists(filepath):
-                    print(f"Info: Priority file {filename} not found at {filepath}")
+            if not os.path.exists(filepath):
+                print(f"Warning: PM_MASTER_2026_CLEANED.csv not found at {filepath}")
+                return priority_map
+
+            df = pd.read_csv(filepath, encoding='utf-8-sig', dtype=str)
+            df.columns = df.columns.str.strip()
+
+            if 'BFM Equipment No' not in df.columns or 'Priority Classification' not in df.columns:
+                print("Warning: Required columns missing in PM_MASTER_2026_CLEANED.csv")
+                return priority_map
+
+            counts = {1: 0, 2: 0, 3: 0, 4: 0}
+            for _, row in df.iterrows():
+                bfm_raw = str(row.get('BFM Equipment No', '')).strip()
+                pclass = str(row.get('Priority Classification', '')).strip().upper()
+                if not bfm_raw or bfm_raw.lower() in ('nan', 'none', ''):
                     continue
+                priority = _p_to_int.get(pclass, 4)
+                priority_map[bfm_raw] = priority
+                counts[priority] += 1
 
-                try:
-                    # Read CSV file
-                    df = pd.read_csv(filepath, encoding='utf-8-sig')
-
-                    # Check if BFM column exists
-                    if 'BFM' not in df.columns:
-                        print(f"Warning: BFM column not found in {filename}")
-                        continue
-
-                    # Map each BFM number to its priority
-                    for bfm in df['BFM'].dropna().unique():
-                        try:
-                            if pd.notna(bfm):
-                                # Handle both string and numeric BFM values
-                                if isinstance(bfm, str):
-                                    bfm_str = bfm.strip()
-                                elif isinstance(bfm, (int, float)):
-                                    bfm_str = str(int(float(bfm)))
-                                else:
-                                    bfm_str = str(bfm)
-
-                                if bfm_str:
-                                    priority_map[bfm_str] = priority
-                        except (ValueError, TypeError) as e:
-                            print(f"Warning: Could not convert BFM value '{bfm}' in {filename}: {e}")
-                            continue
-
-                    print(f"Loaded {len([b for b in df['BFM'].dropna() if pd.notna(b)])} priority {priority} assets from {filename}")
-
-                except pd.errors.EmptyDataError:
-                    print(f"Warning: {filename} is empty")
-                except pd.errors.ParserError as e:
-                    print(f"Warning: Could not parse {filename}: {e}")
-                except Exception as e:
-                    print(f"Warning: Error loading {filename}: {str(e)}")
+            for tier, count in counts.items():
+                if count:
+                    print(f"Loaded {count} P{tier} assets from PM_MASTER_2026_CLEANED.csv")
+            print(f"Total priority assets loaded: {len(priority_map)}")
 
         except Exception as e:
-            print(f"Warning: Error in priority asset loading system: {str(e)}")
-            print("Continuing with empty priority map - all assets will have default priority")
+            print(f"Warning: Error loading priority assets: {e}")
+            print("Continuing with empty priority map - all assets will default to P4")
 
-        print(f"Total priority assets loaded: {len(priority_map)}")
         return priority_map
     
     def generate_weekly_schedule(self, week_start_str: str, weekly_pm_target: int) -> Dict:

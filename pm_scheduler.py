@@ -796,14 +796,9 @@ class PMSchedulingService:
         self.priority_map = self._load_priority_assets()
 
     def _load_priority_assets(self) -> Dict[str, int]:
-        """Load priority assets from CSV files"""
+        """Load priority from PM_MASTER_2026_CLEANED.csv using the Priority Classification column."""
         priority_map = {}
-
-        priority_files = [
-            ('PM_LIST_A220_1.csv', 1),  # P1 assets
-            ('PM_LIST_A220_2.csv', 2),  # P2 assets
-            ('PM_LIST_A220_3.csv', 3),  # P3 assets
-        ]
+        _p_to_int = {'P1': 1, 'P2': 2, 'P3': 3, 'P4': 4}
 
         try:
             try:
@@ -811,44 +806,37 @@ class PMSchedulingService:
             except NameError:
                 script_dir = os.getcwd()
 
-            for filename, priority in priority_files:
-                filepath = os.path.join(script_dir, filename)
+            filepath = os.path.join(script_dir, 'PM_MASTER_2026_CLEANED.csv')
 
-                if not os.path.exists(filepath):
-                    print(f"Info: Priority file {filename} not found at {filepath}")
+            if not os.path.exists(filepath):
+                print(f"Warning: PM_MASTER_2026_CLEANED.csv not found at {filepath}")
+                return priority_map
+
+            df = pd.read_csv(filepath, encoding='utf-8-sig', dtype=str)
+            df.columns = df.columns.str.strip()
+
+            if 'BFM Equipment No' not in df.columns or 'Priority Classification' not in df.columns:
+                print("Warning: Required columns missing in PM_MASTER_2026_CLEANED.csv")
+                return priority_map
+
+            counts = {1: 0, 2: 0, 3: 0, 4: 0}
+            for _, row in df.iterrows():
+                bfm_raw = str(row.get('BFM Equipment No', '')).strip()
+                pclass = str(row.get('Priority Classification', '')).strip().upper()
+                if not bfm_raw or bfm_raw.lower() in ('nan', 'none', ''):
                     continue
+                priority = _p_to_int.get(pclass, 4)
+                priority_map[bfm_raw] = priority
+                counts[priority] += 1
 
-                try:
-                    df = pd.read_csv(filepath, encoding='utf-8-sig')
-
-                    if 'BFM' not in df.columns:
-                        print(f"Warning: BFM column not found in {filename}")
-                        continue
-
-                    for bfm in df['BFM'].dropna().unique():
-                        try:
-                            if pd.notna(bfm):
-                                if isinstance(bfm, str):
-                                    bfm_str = bfm.strip()
-                                elif isinstance(bfm, (int, float)):
-                                    bfm_str = str(int(float(bfm)))
-                                else:
-                                    bfm_str = str(bfm)
-
-                                if bfm_str:
-                                    priority_map[bfm_str] = priority
-                        except (ValueError, TypeError) as e:
-                            print(f"Warning: Could not convert BFM value '{bfm}' in {filename}: {e}")
-                            continue
-
-                    count = len([b for b in df['BFM'].dropna() if pd.notna(b)])
-                    print(f"Loaded {count} P{priority} assets from {filename}")
-
-                except Exception as e:
-                    print(f"Error loading {filename}: {e}")
+            for tier, count in counts.items():
+                if count:
+                    print(f"Loaded {count} P{tier} assets from PM_MASTER_2026_CLEANED.csv")
+            print(f"Total priority assets loaded: {len(priority_map)}")
 
         except Exception as e:
-            print(f"Error loading priority files: {e}")
+            print(f"Warning: Error loading priority assets: {e}")
+            print("Continuing with empty priority map - all assets will default to P4")
 
         return priority_map
 
