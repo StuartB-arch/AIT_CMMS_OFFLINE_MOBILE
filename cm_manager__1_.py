@@ -1130,7 +1130,6 @@ class AnalyticsView(tk.Frame):
     def _render_ttr(self, df, period):
         import matplotlib.patches as mpatches
         import matplotlib.lines  as mlines
-        from scipy.interpolate import make_interp_spline
 
         self._clear_tab("ttr")
         frm = self._tab_frames["ttr"]
@@ -1263,25 +1262,20 @@ class AnalyticsView(tk.Frame):
                         f" Target {sla_lbl}", color=DANGER,
                         fontsize=8, va="bottom", ha="right", fontweight="bold")
 
-                # Trend line
+                # Trend line (straight linear regression)
                 has_data = ~np.isnan(vals)
                 x_data   = x[has_data].astype(float)
                 y_data   = vals[has_data]
                 trend_line = None
                 if len(x_data) >= 2:
-                    slope     = np.polyfit(x_data, y_data, 1)[0]
+                    coeffs    = np.polyfit(x_data, y_data, 1)
+                    slope     = coeffs[0]
                     t_color   = SUCCESS if slope < 0 else ACCENT2
                     direction = "improving ↓" if slope < 0 else "worsening ↑"
-                    if len(x_data) >= 4:
-                        k      = min(3, len(x_data) - 1)
-                        spline = make_interp_spline(x_data, y_data, k=k)
-                        xs     = np.linspace(x_data[0], x_data[-1], 300)
-                        ys     = np.clip(spline(xs), 0, None)
-                    else:
-                        xs, ys = x_data, y_data
+                    xs = np.array([x_data[0], x_data[-1]])
+                    ys = np.clip(np.polyval(coeffs, xs), 0, None)
                     ax.plot(xs, ys, color=t_color, linewidth=2.2,
-                            linestyle=":", zorder=8,
-                            marker="o" if len(x_data) < 4 else None, markersize=4)
+                            linestyle=":", zorder=8)
                     trend_line = mlines.Line2D([], [], color=t_color, linewidth=2.2,
                                                linestyle=":", label=f"Trend ({direction})")
 
@@ -1413,12 +1407,16 @@ class AnalyticsView(tk.Frame):
             ax.bar(x_pos, np.nan_to_num(vals, nan=0.0),
                    color=bar_colors, alpha=0.85, zorder=3, width=0.65)
 
-            # Trend line through weeks that have data
+            # Straight linear trend line through weeks that have data
             valid = ~np.isnan(vals)
             if valid.sum() > 1:
-                ax.plot(x_pos[valid], vals[valid], color=color,
-                        linewidth=2, marker="o", markersize=5,
-                        zorder=5, alpha=0.95)
+                xv = x_pos[valid].astype(float)
+                yv = vals[valid]
+                coeffs = np.polyfit(xv, yv, 1)
+                xs_trend = np.array([xv[0], xv[-1]])
+                ys_trend = np.clip(np.polyval(coeffs, xs_trend), 0, None)
+                ax.plot(xs_trend, ys_trend, color=color,
+                        linewidth=2, zorder=5, alpha=0.95)
             elif valid.sum() == 1:
                 ax.plot(x_pos[valid], vals[valid], color=color,
                         linewidth=0, marker="o", markersize=7, zorder=5)
@@ -1476,8 +1474,8 @@ class AnalyticsView(tk.Frame):
         if df2["date_dt"].isna().all():
             self._no_data("wo_status"); return
 
-        fig, axes = _make_fig(1, 2, figsize=(13,5))
-        ax1, ax2  = axes[0]
+        fig, axes = _make_fig(1, 1, figsize=(13, 5))
+        ax1 = axes[0][0]
 
         # Group by week
         df2["week"] = df2["date_dt"].dt.to_period("W").dt.start_time
@@ -1504,21 +1502,9 @@ class AnalyticsView(tk.Frame):
         ax1.legend(facecolor=PLOT_BG, labelcolor=TEXT, fontsize=8)
         _style_ax(ax1, f"WOs Opened vs Closed (by Week) — {period}", ylabel="Count")
 
-        # Cumulative backlog
-        cum_open   = np.cumsum(opened_a)
-        cum_closed = np.cumsum(closed_a)
-        backlog    = cum_open - cum_closed
-        ax2.fill_between(list(x), backlog, alpha=0.25, color=DANGER)
-        ax2.plot(list(x), backlog, color=DANGER, linewidth=2, marker="o", markersize=4)
-        ax2.set_xticks([i for i in x if i % step == 0])
-        ax2.set_xticklabels([xlbls[i] for i in x if i % step == 0],
-                            rotation=30, ha="right", fontsize=7)
-        ax2.axhline(0, color=SUCCESS, linewidth=1, linestyle="--", alpha=0.6)
-        _style_ax(ax2, "Cumulative Open Backlog (Opened − Closed)", ylabel="Open WOs")
-
         fig.suptitle(f"WO Opened vs Closed  |  {period}",
                      color=TEXT, fontsize=12, fontweight="bold", y=1.01)
-        fig.subplots_adjust(left=0.08, right=0.93, top=0.93, bottom=0.18, wspace=0.38)
+        fig.subplots_adjust(left=0.08, right=0.97, top=0.93, bottom=0.18)
         self._embed("wo_status", fig)
 
     # ── 4. WO Age Profile ─────────────────────────────────────────────────────
@@ -1574,48 +1560,68 @@ class AnalyticsView(tk.Frame):
         fig.subplots_adjust(left=0.08, right=0.93, top=0.93, bottom=0.18, wspace=0.38)
         self._embed("age", fig)
 
-    # ── 5. P1 Pareto ──────────────────────────────────────────────────────────
+    # ── 5. Pareto by Priority (Weekly YTD) ────────────────────────────────────
     def _render_p1_pareto(self, df, period):
         self._clear_tab("p1_pareto")
 
-        # 2x2 grid: one Pareto per priority
+        # Build YTD week spine: Mon Jan 1-week → current week
+        today         = pd.Timestamp.now().normalize()
+        jan1          = pd.Timestamp(f"{today.year}-01-01")
+        week_start_jan = jan1 - pd.Timedelta(days=jan1.weekday())
+        week_starts   = pd.date_range(start=week_start_jan, end=today, freq="W-MON")
+        n_weeks       = len(week_starts)
+        week_labels   = [ws.strftime("Wk%U\n%b %d") for ws in week_starts]
+        x_pos         = np.arange(n_weeks)
+
+        # Tag every CM with its week-start Monday
+        df2 = df.copy()
+        df2["date_dt"] = pd.to_datetime(df2["date"], errors="coerce")
+        df2["week"]    = df2["date_dt"].dt.to_period("W").apply(
+            lambda p: p.start_time.normalize() if pd.notna(p) else pd.NaT
+        )
+
         plt.style.use("dark_background")
-        fig = plt.figure(figsize=(14, 9), facecolor=BG2)
-        fig.patch.set_facecolor(BG2)
         import matplotlib.gridspec as mgridspec
-        gs = mgridspec.GridSpec(2, 2, figure=fig,
-                                hspace=0.55, wspace=0.38,
-                                left=0.07, right=0.97,
-                                top=0.91, bottom=0.10)
+
+        # 1×4 grid: all four priority charts horizontally across the page
+        fig_w = max(20, n_weeks * 0.55 * 4 + 4)
+        fig   = plt.figure(figsize=(fig_w, 5.5), facecolor=BG2)
+        fig.patch.set_facecolor(BG2)
+        gs = mgridspec.GridSpec(1, 4, figure=fig,
+                                hspace=0.0, wspace=0.35,
+                                left=0.04, right=0.98,
+                                top=0.88, bottom=0.20)
 
         for idx, p in enumerate(PRIO_ORDER):
-            ax  = fig.add_subplot(gs[idx // 2, idx % 2])
-            axr = ax.twinx()
-            sub    = df[df["criticality"] == p].copy()
+            ax     = fig.add_subplot(gs[0, idx])
+            sub    = df2[df2["criticality"] == p].copy()
             pcolor = PRIO_COLORS[p]
 
             if not sub.empty:
-                by_st = sub["station"].value_counts().head(12)
-                cum   = by_st.cumsum() / by_st.sum() * 100
-                xr    = range(len(by_st))
-                bars  = ax.bar(xr, by_st.values, color=pcolor, alpha=0.85, zorder=3)
-                _bar_labels(ax, bars, fmt="{:.0f}", color=TEXT, fontsize=7)
-                ax.set_xticks(xr)
-                ax.set_xticklabels(by_st.index, rotation=35, ha="right", fontsize=7)
-                axr.plot(xr, cum.values, color=ACCENT2, marker="o",
-                         markersize=4, linewidth=2, zorder=4)
-                axr.axhline(80, color=TEXT_DIM, linestyle="--", linewidth=1, alpha=0.5)
-                axr.set_ylim(0, 115)
-                axr.set_ylabel("Cum %", color=TEXT_DIM, fontsize=7)
-                axr.tick_params(colors=TEXT_DIM, labelsize=7)
+                weekly_counts = (
+                    sub.groupby("week").size()
+                    .reindex(week_starts)
+                    .fillna(0)
+                    .astype(int)
+                )
+                vals = weekly_counts.values
+
+                bars = ax.bar(x_pos, vals, color=pcolor, alpha=0.85, zorder=3, width=0.7)
+                _bar_labels(ax, bars, fmt="{:.0f}", color=TEXT, fontsize=6.5)
+
+                ax.set_xticks(x_pos)
+                ax.set_xticklabels(week_labels, fontsize=6, rotation=45, ha="right")
+                ax.set_xlim(-0.7, n_weeks - 0.3)
+                ax.set_ylim(0)
 
                 ttr_sub = sub[sub["ttr_hrs"].notna() & (sub["ttr_hrs"] >= 0)]["ttr_hrs"]
                 if not ttr_sub.empty:
                     pct_ok  = (ttr_sub <= SLA_TTR[p]).sum() / len(ttr_sub) * 100
                     badge_c = SUCCESS if pct_ok >= 80 else ACCENT2 if pct_ok >= 50 else DANGER
                     ax.text(0.02, 0.97,
-                            f"TTR target {SLA_TTR_LBL[p]}  |  Within target: {pct_ok:.0f}%  (n={len(ttr_sub)})",
-                            transform=ax.transAxes, ha="left", va="top", fontsize=7, color=badge_c,
+                            f"TTR {SLA_TTR_LBL[p]}  |  {pct_ok:.0f}% on-target  (n={len(ttr_sub)})",
+                            transform=ax.transAxes, ha="left", va="top", fontsize=6.5,
+                            color=badge_c,
                             bbox=dict(facecolor=BG3, alpha=0.7, pad=2, edgecolor=badge_c))
                 ax.text(0.98, 0.97, f"{len(sub)} CMs",
                         transform=ax.transAxes, ha="right", va="top",
@@ -1625,10 +1631,10 @@ class AnalyticsView(tk.Frame):
                         transform=ax.transAxes, ha="center", va="center",
                         color=TEXT_DIM, fontsize=10)
 
-            _style_ax(ax, f"{p} — Pareto by Station  (TTR target {SLA_TTR_LBL[p]})",
-                      ylabel="Count")
+            _style_ax(ax, f"{p} — Weekly CMs YTD  (SLA {SLA_TTR_LBL[p]})",
+                      ylabel="CM Count")
 
-        fig.suptitle(f"Pareto of Failures by Priority (P1-P4)  |  {period}",
+        fig.suptitle(f"CM Frequency by Priority — Weekly YTD  |  {period}",
                      color=TEXT, fontsize=12, fontweight="bold")
         self._figs["p1_pareto"] = fig
         canvas = FigureCanvasTkAgg(fig, self._tab_frames["p1_pareto"])
@@ -1655,21 +1661,13 @@ class AnalyticsView(tk.Frame):
 
         freq = df2["station_norm"].value_counts().head(15)
         if not freq.empty:
-            cum_pct   = freq.cumsum() / freq.sum() * 100
-            x         = range(len(freq))
+            x          = range(len(freq))
             bar_colors = [DANGER if v >= threshold else ACCENT2 if v == 2 else ACCENT
                           for v in freq.values]
             bars = ax1.bar(x, freq.values, color=bar_colors, alpha=0.85, zorder=3)
             _bar_labels(ax1, bars, fmt="{:.0f}")
             ax1.set_xticks(x)
             ax1.set_xticklabels(freq.index, rotation=30, ha="right", fontsize=8)
-            ax1b = ax1.twinx()
-            ax1b.plot(x, cum_pct.values, color=ACCENT2, marker="o",
-                      markersize=5, linewidth=2, zorder=4)
-            ax1b.axhline(80, color=TEXT_DIM, linestyle="--", linewidth=1, alpha=0.5)
-            ax1b.set_ylim(0, 115)
-            ax1b.set_ylabel("Cumulative %", color=TEXT_DIM, fontsize=8)
-            ax1b.tick_params(colors=TEXT_DIM, labelsize=8)
             ax1.axhline(threshold, color=DANGER, linewidth=1.2,
                         linestyle=":", alpha=0.6, zorder=5)
             ax1.text(0.99, 0.98,
