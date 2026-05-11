@@ -454,9 +454,10 @@ COLS = ("Date","Time","Andon","Event ID","BFM #","Station","User",
 COL_W = [85,75,65,95,90,90,120,55,90,280,85,75,90,85,65,160]
 
 class RecordsView(tk.Frame):
-    def __init__(self, master):
+    def __init__(self, master, on_change_cb=None):
         super().__init__(master, bg=BG2)
         self._edit_id = None
+        self._on_change_cb = on_change_cb
         self._build()
         self.load()
 
@@ -754,6 +755,8 @@ class RecordsView(tk.Frame):
             conn.execute("DELETE FROM cms WHERE id=?", (rid,))
             conn.commit()
         self.load()
+        if self._on_change_cb:
+            self._on_change_cb()
 
     def _edit(self):
         rid = self._selected_id()
@@ -761,7 +764,11 @@ class RecordsView(tk.Frame):
         with get_conn() as conn:
             row = conn.execute("SELECT * FROM cms WHERE id=?", (rid,)).fetchone()
         if not row: return
-        EditDialog(self, row, self.load)
+        def _on_edit_save():
+            self.load()
+            if self._on_change_cb:
+                self._on_change_cb()
+        EditDialog(self, row, _on_edit_save)
 
     def _export(self):
         path = filedialog.asksaveasfilename(
@@ -2865,7 +2872,7 @@ class CMApp(tk.Tk):
         self._analytics = AnalyticsView(self._content)
         self._pages["analytics"] = self._analytics
 
-        self._records = RecordsView(self._content)
+        self._records = RecordsView(self._content, on_change_cb=self._after_delete)
         self._pages["records"] = self._records
 
         self._entry = EntryForm(self._content, self._after_save)
@@ -2890,6 +2897,12 @@ class CMApp(tk.Tk):
             btn.configure(
                 bg=ACCENT if k==key else BG,
                 fg="white" if k==key else TEXT_DIM)
+
+    def _after_delete(self):
+        self._dashboard.refresh()
+        self._analytics.render_all()
+        self._mtbf.render()
+        self._breakdown.render()
 
     def _after_save(self):
         # Reset all Records filters so the newly saved record is always visible
@@ -2976,7 +2989,7 @@ class CMManagerPanel(tk.Frame):
         self._analytics = AnalyticsView(self._content)
         self._pages["analytics"] = self._analytics
 
-        self._records = RecordsView(self._content)
+        self._records = RecordsView(self._content, on_change_cb=self._after_delete)
         self._pages["records"] = self._records
 
         self._entry = EntryForm(self._content, self._after_save)
@@ -3002,6 +3015,12 @@ class CMManagerPanel(tk.Frame):
             btn.configure(
                 bg=ACCENT if k == key else BG,
                 fg="white" if k == key else TEXT_DIM)
+
+    def _after_delete(self):
+        self._dashboard.refresh()
+        self._analytics.render_all()
+        self._mtbf.render()
+        self._breakdown.render()
 
     def _after_save(self):
         self._records.prio_var.set("All")
