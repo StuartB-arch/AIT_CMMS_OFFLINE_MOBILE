@@ -27,6 +27,9 @@ def _pg_to_sqlite(sql: str) -> str:
     sql = re.sub(r'\bBYTEA\b', 'BLOB', sql, flags=re.IGNORECASE)
     sql = re.sub(r'\bDEFAULT\s+TRUE\b', 'DEFAULT 1', sql, flags=re.IGNORECASE)
     sql = re.sub(r'\bDEFAULT\s+FALSE\b', 'DEFAULT 0', sql, flags=re.IGNORECASE)
+    # Convert bare TRUE/FALSE boolean literals (e.g. in WHERE clauses) to SQLite 1/0
+    sql = re.sub(r'\bTRUE\b', '1', sql, flags=re.IGNORECASE)
+    sql = re.sub(r'\bFALSE\b', '0', sql, flags=re.IGNORECASE)
 
     # ADD COLUMN IF NOT EXISTS → ADD COLUMN (duplicate handled in execute())
     sql = re.sub(r'\bADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\b', 'ADD COLUMN', sql, flags=re.IGNORECASE)
