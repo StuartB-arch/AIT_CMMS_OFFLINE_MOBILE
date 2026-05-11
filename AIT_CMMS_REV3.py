@@ -7464,7 +7464,7 @@ class AITCMMSSystem:
                 if not self.technicians:
                     print("WARNING: No technicians found in database, using fallback list")
                     self.technicians = [
-                        "Mark Michaels", "Jerone Bosarge", "Jon Hymel", "Nick Whisenant",
+                        "John Carter", "Mark Michaels", "Jerone Bosarge", "Jon Hymel", "Nick Whisenant",
                         "James Dunnam", "Wayne Dunnam", "Nate Williams", "Rey Marikit", "Ronald Houghs",
                     ]
 
@@ -7472,7 +7472,7 @@ class AITCMMSSystem:
             print(f"Error loading technicians from database: {e}")
             # Use fallback list on error
             self.technicians = [
-                "Mark Michaels", "Jerone Bosarge", "Jon Hymel", "Nick Whisenant",
+                "John Carter", "Mark Michaels", "Jerone Bosarge", "Jon Hymel", "Nick Whisenant",
                 "James Dunnam", "Wayne Dunnam", "Nate Williams", "Rey Marikit", "Ronald Houghs",
             ]
 
