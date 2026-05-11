@@ -170,19 +170,20 @@ class PMEligibilityResult(NamedTuple):
 
 class DateParser:
     """Responsible for parsing and standardizing dates"""
-    
+
     def __init__(self, conn):
         self.conn = conn
-    
+        self._standardizer = None  # lazy-initialised; reused across calls
+
     def parse_flexible(self, date_string: Optional[str]) -> Optional[datetime]:
         """Parse date string with flexible format handling"""
         if not date_string:
             return None
-            
+
         try:
-            # Use your existing DateStandardizer
-            standardizer = DateStandardizer(self.conn)
-            parsed_date = standardizer.parse_date_flexible(date_string)
+            if self._standardizer is None:
+                self._standardizer = DateStandardizer(self.conn)
+            parsed_date = self._standardizer.parse_date_flexible(date_string)
             if parsed_date:
                 return datetime.strptime(parsed_date, '%Y-%m-%d')
         except Exception as e:
@@ -1333,28 +1334,28 @@ class PMSchedulingService:
         sorted_keys = sorted(sap_groups.keys(), key=group_sort_key)
 
         # --- 3. Preload most recent technician assignment per BFM (for rotation) ---
-        all_bfm_nos = list({a.bfm_no for a in assignments})
+        # Load ALL history in one query (no IN-list with thousands of placeholders)
+        # and filter to the relevant BFM set in Python — much faster with large equipment lists.
+        all_bfm_set = {a.bfm_no for a in assignments}
         last_tech_per_bfm: Dict[str, str] = {}
-        if all_bfm_nos:
-            placeholders = ','.join(['%s'] * len(all_bfm_nos))
-            cursor.execute(f'''
-                SELECT bfm_equipment_no, assigned_technician
-                FROM (
-                    SELECT bfm_equipment_no, assigned_technician,
-                        ROW_NUMBER() OVER (PARTITION BY bfm_equipment_no ORDER BY week_start_date DESC, id DESC) as rn
-                    FROM weekly_pm_schedules
-                    WHERE bfm_equipment_no IN ({placeholders})
-                    AND week_start_date < %s
-                    AND assigned_technician IS NOT NULL
-                    AND assigned_technician != ''
-                ) ranked
-                WHERE rn = 1
-            ''', all_bfm_nos + [week_start_str])
-            last_tech_per_bfm = {row[0]: row[1] for row in cursor.fetchall()}
+        cursor.execute('''
+            SELECT bfm_equipment_no, assigned_technician
+            FROM (
+                SELECT bfm_equipment_no, assigned_technician,
+                    ROW_NUMBER() OVER (PARTITION BY bfm_equipment_no ORDER BY week_start_date DESC, id DESC) as rn
+                FROM weekly_pm_schedules
+                WHERE week_start_date < %s
+                AND assigned_technician IS NOT NULL
+                AND assigned_technician != ''
+            ) ranked
+            WHERE rn = 1
+        ''', (week_start_str,))
+        last_tech_per_bfm = {row[0]: row[1] for row in cursor.fetchall()
+                              if row[0] in all_bfm_set}
 
         # --- 4. Assign each group to one technician and build insert batch ---
         batch_insert_data = []
-        # Track asset count per technician this run so fallback groups distribute evenly
+        # Track asset count per technician this run so groups distribute evenly
         tech_asset_count: Dict[str, int] = {t: 0 for t in self.technicians}
         # Normalised lookup: lowercase-stripped name → canonical name in self.technicians
         tech_name_map: Dict[str, str] = {t.strip().lower(): t for t in self.technicians}
@@ -1367,18 +1368,18 @@ class PMSchedulingService:
                                   if b in last_tech_per_bfm]
 
             if group_tech_history:
-                # Resolve stored name via normalised lookup (handles case/whitespace drift)
                 last_tech = tech_name_map.get(group_tech_history[0].strip().lower())
-                if last_tech is not None:
-                    tech_idx = (self.technicians.index(last_tech) + 1) % len(self.technicians)
-                else:
-                    # Last tech not in active list — assign to least-loaded tech
-                    tech_idx = min(range(len(self.technicians)),
-                                   key=lambda i: tech_asset_count[self.technicians[i]])
             else:
-                # No history — assign to least-loaded tech for even distribution
-                tech_idx = min(range(len(self.technicians)),
-                               key=lambda i: tech_asset_count[self.technicians[i]])
+                last_tech = None
+
+            # Assign to the least-loaded technician, skipping whoever did this group
+            # last — this guarantees even distribution for all techs (including new ones)
+            # while still providing variety across weeks.
+            candidates = [i for i in range(len(self.technicians))
+                          if self.technicians[i] != last_tech]
+            if not candidates:  # only one technician available
+                candidates = list(range(len(self.technicians)))
+            tech_idx = min(candidates, key=lambda i: tech_asset_count[self.technicians[i]])
 
             technician = self.technicians[tech_idx]
             tech_asset_count[technician] += len(group)
