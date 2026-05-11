@@ -919,9 +919,26 @@ def _parse_datetimes(df):
     df["ack_dt"]      = _dt("ack_date",       "ack_time")
     df["resolved_dt"] = _dt("resolved_date",  "resolve_time")
     df["response_hrs"] = (df["ack_dt"]      - df["reported_dt"]).dt.total_seconds() / 3600
-    df["ttr_hrs"]      = (df["resolved_dt"] - df["reported_dt"]).dt.total_seconds() / 3600
     df["response_hrs"] = df["response_hrs"].clip(lower=0)
-    df["ttr_hrs"]      = df["ttr_hrs"].clip(lower=0)
+
+    # Use stored resolution_time (HH:MM) as the authoritative TTR source so
+    # the graph always matches the value shown in the All Records table.
+    # Fall back to datetime arithmetic only when resolution_time is blank.
+    def _rt_to_hours(v):
+        s = str(v).strip() if v is not None and str(v).lower() not in ("nan", "none", "") else ""
+        if not s:
+            return float("nan")
+        parts = s.split(":")
+        if len(parts) >= 2:
+            try:
+                return int(parts[0]) + int(parts[1]) / 60.0
+            except Exception:
+                return float("nan")
+        return float("nan")
+
+    ttr_stored = df["resolution_time"].apply(_rt_to_hours)
+    ttr_calc   = (df["resolved_dt"] - df["reported_dt"]).dt.total_seconds() / 3600
+    df["ttr_hrs"] = ttr_stored.where(ttr_stored.notna(), ttr_calc).clip(lower=0)
     df["criticality"]  = df["criticality"].str.strip().str.upper()
     df["station"]      = df["station"].str.strip().str.upper()
     df["andon"]        = df["andon"].str.strip().str.capitalize().replace({"Mediun":"Medium","HIGH":"High","High":"High"})
@@ -1159,8 +1176,10 @@ class AnalyticsView(tk.Frame):
             df_full = pd.read_sql(q, conn, params=params)
         df_full = _parse_datetimes(df_full)
 
+        # A record is "completed" if it has a stored resolution_time OR a
+        # valid resolved_dt — ttr_hrs was already computed from the authoritative source.
         completed = df_full[
-            df_full["resolved_dt"].notna() &
+            (df_full["resolved_dt"].notna() | df_full["resolution_time"].notna()) &
             df_full["ttr_hrs"].notna() &
             (df_full["ttr_hrs"] >= 0)
         ].copy()
