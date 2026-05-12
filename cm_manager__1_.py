@@ -1633,7 +1633,7 @@ class AnalyticsView(tk.Frame):
         scroll_cv.bind_all("<MouseWheel>",
                            lambda e: scroll_cv.yview_scroll(-1 * (e.delta // 120), "units"))
 
-        # ── One full-width chart per priority ─────────────────────────────────
+        # ── One full-width Pareto (80/20) chart per priority ──────────────────
         plt.style.use("dark_background")
         fig_w = max(13, n_weeks * 0.72 + 2)
 
@@ -1643,30 +1643,54 @@ class AnalyticsView(tk.Frame):
 
             fig, ax = plt.subplots(1, 1, figsize=(fig_w, 3.8), facecolor=BG2)
             fig.patch.set_facecolor(BG2)
-            fig.subplots_adjust(left=0.05, right=0.98, top=0.85, bottom=0.22)
+            fig.subplots_adjust(left=0.05, right=0.93, top=0.85, bottom=0.22)
+            axr = ax.twinx()
 
             if sub.empty:
                 ax.set_facecolor(PLOT_BG)
+                axr.set_visible(False)
                 ax.text(0.5, 0.5, f"No {p} CMs in period",
                         transform=ax.transAxes, ha="center", va="center",
                         color=TEXT_DIM, fontsize=12)
-                _style_ax(ax, f"{p} — Weekly CMs YTD  (SLA {SLA_TTR_LBL[p]})",
+                _style_ax(ax, f"{p} — Weekly Pareto YTD  (SLA {SLA_TTR_LBL[p]})",
                           ylabel="CM Count")
             else:
+                # Build weekly counts then sort descending (Pareto order)
                 weekly_counts = (
                     sub.groupby("week").size()
                     .reindex(week_starts)
                     .fillna(0)
                     .astype(int)
                 )
-                vals = weekly_counts.values
+                weekly_sorted  = weekly_counts.sort_values(ascending=False)
+                vals_sorted    = weekly_sorted.values
+                labels_sorted  = [ws.strftime("Wk%U\n%b %d") for ws in weekly_sorted.index]
+                n_bars         = len(vals_sorted)
+                xp             = np.arange(n_bars)
 
-                bars = ax.bar(x_pos, vals, color=pcolor, alpha=0.85, zorder=3, width=0.7)
+                # Cumulative percentage for 80/20 line
+                total    = vals_sorted.sum()
+                cum_pct  = (np.cumsum(vals_sorted) / total * 100) if total > 0 else np.zeros(n_bars)
+
+                bars = ax.bar(xp, vals_sorted, color=pcolor, alpha=0.85, zorder=3, width=0.7)
                 _bar_labels(ax, bars, fmt="{:.0f}", color=TEXT, fontsize=7)
 
-                ax.set_xticks(x_pos)
-                ax.set_xticklabels(week_labels, fontsize=7, rotation=40, ha="right")
-                ax.set_xlim(-0.7, n_weeks - 0.3)
+                # Cumulative % line and 80% threshold
+                axr.plot(xp, cum_pct, color=ACCENT2, marker="o",
+                         markersize=4, linewidth=2.2, zorder=4, alpha=0.95)
+                axr.axhline(80, color=TEXT_DIM, linestyle="--", linewidth=1,
+                            alpha=0.55, zorder=3)
+                axr.text(n_bars - 0.5, 81, " 80%", color=TEXT_DIM,
+                         fontsize=7, va="bottom", ha="right")
+                axr.set_ylim(0, 115)
+                axr.set_ylabel("Cumulative %", color=TEXT_DIM, fontsize=8)
+                axr.tick_params(colors=TEXT_DIM, labelsize=8)
+                for sp in axr.spines.values():
+                    sp.set_edgecolor(GRID_C)
+
+                ax.set_xticks(xp)
+                ax.set_xticklabels(labels_sorted, fontsize=7, rotation=40, ha="right")
+                ax.set_xlim(-0.7, n_bars - 0.3)
                 ax.set_ylim(0)
                 ax.grid(axis="y", color=GRID_C, linewidth=0.4, alpha=0.5, zorder=0)
 
@@ -1683,7 +1707,7 @@ class AnalyticsView(tk.Frame):
                         transform=ax.transAxes, ha="right", va="top",
                         fontsize=8, color=pcolor, fontweight="bold")
 
-                _style_ax(ax, f"{p} — Weekly CMs YTD  |  SLA {SLA_TTR_LBL[p]}  |  {period}",
+                _style_ax(ax, f"{p} — Weekly Pareto YTD  |  SLA {SLA_TTR_LBL[p]}  |  {period}",
                           ylabel="CM Count")
 
             self._figs[f"pareto_{p}"] = fig
