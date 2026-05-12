@@ -1586,30 +1586,24 @@ class AnalyticsView(tk.Frame):
         fig.subplots_adjust(left=0.08, right=0.93, top=0.93, bottom=0.18, wspace=0.38)
         self._embed("age", fig)
 
-    # ── 5. Pareto by Priority (Weekly YTD) ────────────────────────────────────
+    # ── 5. Pareto by Priority — Incident Type (80/20) ─────────────────────────
     def _render_p1_pareto(self, df, period):
         self._clear_tab("p1_pareto")
         frm = self._tab_frames["p1_pareto"]
 
         tk.Label(frm,
-                 text=f"  CM Frequency by Priority — Weekly YTD  |  {period}",
+                 text=f"  CM Frequency by Priority — Incident Type Pareto  |  {period}",
                  bg=BG2, fg=ACCENT, font=FONT_HEADER,
                  anchor="w").pack(fill="x", padx=8, pady=(6, 2))
 
-        # Build YTD week spine: Mon Jan 1-week → current week
-        today          = pd.Timestamp.now().normalize()
-        jan1           = pd.Timestamp(f"{today.year}-01-01")
-        week_start_jan = jan1 - pd.Timedelta(days=jan1.weekday())
-        week_starts    = pd.date_range(start=week_start_jan, end=today, freq="W-MON")
-        n_weeks        = len(week_starts)
-        week_labels    = [ws.strftime("Wk%U\n%b %d") for ws in week_starts]
-        x_pos          = np.arange(n_weeks)
-
-        # Tag every CM with its week-start Monday
+        # Normalise root_cause → known RC_COLORS categories or "Other"
         df2 = df.copy()
-        df2["date_dt"] = pd.to_datetime(df2["date"], errors="coerce")
-        df2["week"]    = df2["date_dt"].dt.to_period("W").apply(
-            lambda p: p.start_time.normalize() if pd.notna(p) else pd.NaT
+        df2["root_cause"] = (
+            df2["root_cause"].fillna("").str.strip().replace("", "Unknown")
+        )
+        known_rc = set(RC_COLORS.keys())
+        df2["root_cause"] = df2["root_cause"].apply(
+            lambda v: v if v in known_rc else "Other"
         )
 
         # ── Scrollable container (vertical) ──────────────────────────────────
@@ -1635,15 +1629,13 @@ class AnalyticsView(tk.Frame):
 
         # ── One full-width Pareto (80/20) chart per priority ──────────────────
         plt.style.use("dark_background")
-        fig_w = max(13, n_weeks * 0.72 + 2)
 
-        for idx, p in enumerate(PRIO_ORDER):
-            pcolor = PRIO_COLORS[p]
-            sub    = df2[df2["criticality"] == p].copy()
+        for p in PRIO_ORDER:
+            sub = df2[df2["criticality"] == p].copy()
 
-            fig, ax = plt.subplots(1, 1, figsize=(fig_w, 3.8), facecolor=BG2)
+            fig, ax = plt.subplots(1, 1, figsize=(10, 3.8), facecolor=BG2)
             fig.patch.set_facecolor(BG2)
-            fig.subplots_adjust(left=0.05, right=0.93, top=0.85, bottom=0.22)
+            fig.subplots_adjust(left=0.07, right=0.93, top=0.85, bottom=0.18)
             axr = ax.twinx()
 
             if sub.empty:
@@ -1652,32 +1644,32 @@ class AnalyticsView(tk.Frame):
                 ax.text(0.5, 0.5, f"No {p} CMs in period",
                         transform=ax.transAxes, ha="center", va="center",
                         color=TEXT_DIM, fontsize=12)
-                _style_ax(ax, f"{p} — Weekly Pareto YTD  (SLA {SLA_TTR_LBL[p]})",
+                _style_ax(ax, f"{p} — Incident Type Pareto  (SLA {SLA_TTR_LBL[p]})",
                           ylabel="CM Count")
             else:
-                # Build weekly counts then sort descending (Pareto order)
-                weekly_counts = (
-                    sub.groupby("week").size()
-                    .reindex(week_starts)
-                    .fillna(0)
-                    .astype(int)
-                )
-                weekly_sorted  = weekly_counts.sort_values(ascending=False)
-                vals_sorted    = weekly_sorted.values
-                labels_sorted  = [ws.strftime("Wk%U\n%b %d") for ws in weekly_sorted.index]
-                n_bars         = len(vals_sorted)
-                xp             = np.arange(n_bars)
+                # Count by incident type, sorted descending (Pareto order)
+                rc_counts  = sub["root_cause"].value_counts()
+                rc_labels  = rc_counts.index.tolist()
+                rc_vals    = rc_counts.values
+                n_bars     = len(rc_labels)
+                xp         = np.arange(n_bars)
+                bar_cols   = [RC_COLORS.get(rc, RC_COLORS["Other"]) for rc in rc_labels]
 
                 # Cumulative percentage for 80/20 line
-                total    = vals_sorted.sum()
-                cum_pct  = (np.cumsum(vals_sorted) / total * 100) if total > 0 else np.zeros(n_bars)
+                total   = rc_vals.sum()
+                cum_pct = np.cumsum(rc_vals) / total * 100 if total > 0 else np.zeros(n_bars)
 
-                bars = ax.bar(xp, vals_sorted, color=pcolor, alpha=0.85, zorder=3, width=0.7)
-                _bar_labels(ax, bars, fmt="{:.0f}", color=TEXT, fontsize=7)
+                bars = ax.bar(xp, rc_vals, color=bar_cols, alpha=0.88, zorder=3,
+                              width=0.55, edgecolor=BG3, linewidth=0.6)
+
+                for b, v in zip(bars, rc_vals):
+                    ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.15,
+                            str(int(v)), ha="center", va="bottom",
+                            fontsize=9, color=TEXT, fontweight="bold", zorder=5)
 
                 # Cumulative % line and 80% threshold
                 axr.plot(xp, cum_pct, color=ACCENT2, marker="o",
-                         markersize=4, linewidth=2.2, zorder=4, alpha=0.95)
+                         markersize=5, linewidth=2.2, zorder=4, alpha=0.95)
                 axr.axhline(80, color=TEXT_DIM, linestyle="--", linewidth=1,
                             alpha=0.55, zorder=3)
                 axr.text(n_bars - 0.5, 81, " 80%", color=TEXT_DIM,
@@ -1689,8 +1681,8 @@ class AnalyticsView(tk.Frame):
                     sp.set_edgecolor(GRID_C)
 
                 ax.set_xticks(xp)
-                ax.set_xticklabels(labels_sorted, fontsize=7, rotation=40, ha="right")
-                ax.set_xlim(-0.7, n_bars - 0.3)
+                ax.set_xticklabels(rc_labels, fontsize=10, rotation=20, ha="right")
+                ax.set_xlim(-0.6, n_bars - 0.4)
                 ax.set_ylim(0)
                 ax.grid(axis="y", color=GRID_C, linewidth=0.4, alpha=0.5, zorder=0)
 
@@ -1705,9 +1697,9 @@ class AnalyticsView(tk.Frame):
                             bbox=dict(facecolor=BG3, alpha=0.75, pad=3, edgecolor=badge_c))
                 ax.text(0.99, 0.97, f"{len(sub)} CMs total",
                         transform=ax.transAxes, ha="right", va="top",
-                        fontsize=8, color=pcolor, fontweight="bold")
+                        fontsize=8, color=PRIO_COLORS[p], fontweight="bold")
 
-                _style_ax(ax, f"{p} — Weekly Pareto YTD  |  SLA {SLA_TTR_LBL[p]}  |  {period}",
+                _style_ax(ax, f"{p} — Incident Type Pareto  |  SLA {SLA_TTR_LBL[p]}  |  {period}",
                           ylabel="CM Count")
 
             self._figs[f"pareto_{p}"] = fig
