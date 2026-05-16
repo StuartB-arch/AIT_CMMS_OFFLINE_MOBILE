@@ -502,17 +502,20 @@ class PMEligibilityChecker:
                 if next_annual_date:
                     days_until_next_annual = (next_annual_date - datetime.now()).days
 
-                    # Schedule annual PMs up to 60 days before they are due so the weekly
-                    # scheduler always has a full queue (~24 annual PMs/wk for 1 200-unit fleet).
-                    if days_until_next_annual > 60:
+                    # Schedule annual PMs up to 120 days before they are due so the weekly
+                    # scheduler always has a full queue.  With ~1 200 annual-PM units and a
+                    # 365-day cycle the fleet needs ~24 annual PMs/week; a 120-day window
+                    # exposes ~290 candidates so any reasonable weekly target can be filled.
+                    if days_until_next_annual > 120:
                         return PMEligibilityResult(
                             PMStatus.NOT_DUE,
                             f"Annual PM scheduled for {next_annual_date.strftime('%Y-%m-%d')} ({days_until_next_annual} days from now)"
                         )
-                    # Approaching within 60 days — schedule now, priority based on how soon
+                    # Approaching within 120 days — schedule now, priority based on how soon.
+                    # Formula: closer to due = higher score (200–424 range stays below 500
+                    # so overdue/within-7-day items always sort first).
                     elif days_until_next_annual > 7:
-                        # Closer to due date = higher score (200–377 range)
-                        priority = 200 + (60 - days_until_next_annual) * 3
+                        priority = 200 + (120 - days_until_next_annual) * 2
                         return PMEligibilityResult(
                             PMStatus.DUE,
                             f"Annual PM approaching in {days_until_next_annual} days (due: {next_annual_date.strftime('%Y-%m-%d')})",

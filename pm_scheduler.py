@@ -363,10 +363,18 @@ class PMEligibilityChecker:
                 if next_annual_date:
                     days_until_next_annual = (next_annual_date - datetime.now()).days
 
-                    if days_until_next_annual > 7:
+                    if days_until_next_annual > 120:
                         return PMEligibilityResult(
                             PMStatus.NOT_DUE,
                             f"Annual PM scheduled for {next_annual_date.strftime('%Y-%m-%d')} ({days_until_next_annual} days from now)"
+                        )
+                    elif days_until_next_annual > 7:
+                        # Approaching within 120 days — closer to due = higher score (200–424)
+                        priority = 200 + (120 - days_until_next_annual) * 2
+                        return PMEligibilityResult(
+                            PMStatus.DUE,
+                            f"Annual PM approaching in {days_until_next_annual} days (due: {next_annual_date.strftime('%Y-%m-%d')})",
+                            priority_score=priority,
                         )
                     elif days_until_next_annual >= -30:
                         priority = 500 + abs(min(days_until_next_annual, 0)) * 10
