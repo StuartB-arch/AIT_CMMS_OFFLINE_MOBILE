@@ -61,6 +61,7 @@ class PMAssignment:
     priority_score: int
     reason: str
     has_custom_template: bool = False  # True if equipment has custom PM template
+    is_backlog: bool = False  # True if this PM was previously scheduled but not completed
 
 
 class PMEligibilityResult(NamedTuple):
@@ -68,6 +69,7 @@ class PMEligibilityResult(NamedTuple):
     reason: str
     priority_score: int = 0
     days_overdue: int = 0
+    is_backlog: bool = False
 
 
 class DateParser:
@@ -127,12 +129,13 @@ class CompletionRecordRepository:
         completions = []
         for row in cursor.fetchall():
             try:
-                # Map string to PMType enum
                 pm_type_str = row[1]
                 if pm_type_str == "Weekly":
                     pm_type = PMType.WEEKLY
                 elif pm_type_str == "Monthly":
                     pm_type = PMType.MONTHLY
+                elif pm_type_str == "Six Month":
+                    pm_type = PMType.SIX_MONTH
                 else:
                     pm_type = PMType.ANNUAL
 
@@ -166,12 +169,13 @@ class CompletionRecordRepository:
         for row in cursor.fetchall():
             try:
                 bfm_no = row[0]
-                # Map string to PMType enum
                 pm_type_str = row[1]
                 if pm_type_str == "Weekly":
                     pm_type = PMType.WEEKLY
                 elif pm_type_str == "Monthly":
                     pm_type = PMType.MONTHLY
+                elif pm_type_str == "Six Month":
+                    pm_type = PMType.SIX_MONTH
                 else:
                     pm_type = PMType.ANNUAL
 
@@ -328,15 +332,20 @@ class PMEligibilityChecker:
         if pm_type == PMType.ANNUAL and not equipment.has_annual:
             return PMEligibilityResult(PMStatus.NOT_DUE, "Equipment doesn't require Annual PM")
 
-        # Check for uncompleted schedules from PREVIOUS weeks
+        # Check for uncompleted schedules from PREVIOUS weeks — treat as BACKLOG, highest priority
         uncompleted_schedules = self.completion_repo.get_uncompleted_schedules(
             equipment.bfm_no, pm_type, week_start
         )
         if uncompleted_schedules:
-            oldest_uncompleted = uncompleted_schedules[-1]
+            weeks_in_backlog = len(uncompleted_schedules)
+            oldest = uncompleted_schedules[-1]
+            # Priority 1500–1999: above never-completed (900–1100) so backlog always leads
+            backlog_priority = min(1500 + (weeks_in_backlog * 100), 1999)
             return PMEligibilityResult(
-                PMStatus.CONFLICTED,
-                f"Already scheduled for week {oldest_uncompleted['week_start']} (uncompleted) - assigned to {oldest_uncompleted['technician']}"
+                PMStatus.DUE,
+                f"BACKLOG: {weeks_in_backlog} week(s) unresolved (oldest: week of {oldest['week_start']})",
+                priority_score=backlog_priority,
+                is_backlog=True,
             )
 
         # For Annual PMs, check if there's a Next Annual PM Date specified
@@ -671,7 +680,8 @@ class PMAssignmentGenerator:
                         equipment.description,
                         weekly_result.priority_score,
                         weekly_result.reason,
-                        has_custom
+                        has_custom,
+                        weekly_result.is_backlog,
                     ))
 
             # Check Monthly PM eligibility
@@ -694,7 +704,8 @@ class PMAssignmentGenerator:
                             equipment.description,
                             monthly_result.priority_score,
                             monthly_result.reason,
-                            has_custom
+                            has_custom,
+                            monthly_result.is_backlog,
                         ))
 
             # Check Six Month PM eligibility
@@ -721,7 +732,8 @@ class PMAssignmentGenerator:
                             equipment.description,
                             six_month_result.priority_score,
                             six_month_result.reason,
-                            has_custom
+                            has_custom,
+                            six_month_result.is_backlog,
                         ))
 
             # Check Annual PM eligibility
@@ -752,27 +764,34 @@ class PMAssignmentGenerator:
                             equipment.description,
                             annual_result.priority_score,
                             annual_result.reason,
-                            has_custom
+                            has_custom,
+                            annual_result.is_backlog,
                         ))
 
         print(f"DEBUG: Finished processing all {total_equipment} equipment items")
         print(f"DEBUG: Found {len(potential_assignments)} potential assignments")
 
-        # Sort: P1 (1) → P2 (2) → P3 (3) → P4 (4); within each tier, most-overdue first
-        print(f"DEBUG: Sorting assignments by priority (P1→P2→P3→P4, then by days overdue)...")
+        # Sort order:
+        #   Tier 0 — BACKLOG (previously scheduled but not completed), P1→P4, then most-overdue first
+        #   Tier 1 — ACTIVE eligible PMs, P1→P4, then most-overdue first (last inspection date drives score)
+        print(f"DEBUG: Sorting assignments — backlog (P1→P4) first, then active eligible (P1→P4, by last inspection)...")
         potential_assignments.sort(
             key=lambda x: (
+                0 if x.is_backlog else 1,              # Backlog block comes before regular block
                 equipment_priority_map.get(x.bfm_no, 4),  # P1=1, P2=2, P3=3, P4=4
-                -x.priority_score  # Within tier: higher score = more overdue = scheduled first
+                -x.priority_score,                     # Higher score = longer since last inspection = first
             )
         )
 
         # Log priority breakdown
+        n_backlog = sum(1 for x in potential_assignments if x.is_backlog)
+        if n_backlog:
+            print(f"DEBUG:   BACKLOG: {n_backlog} PM(s) rescheduled from previous weeks")
         for tier in (1, 2, 3, 4):
             n = sum(1 for x in potential_assignments
-                    if equipment_priority_map.get(x.bfm_no, 4) == tier)
+                    if not x.is_backlog and equipment_priority_map.get(x.bfm_no, 4) == tier)
             if n:
-                print(f"DEBUG:   P{tier}: {n} eligible PM(s)")
+                print(f"DEBUG:   P{tier} active: {n} eligible PM(s)")
         print(f"DEBUG: Returning top {max_assignments} assignments")
 
         return potential_assignments[:max_assignments]
