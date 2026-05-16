@@ -161,12 +161,14 @@ class PMAssignment:
     reason: str
     sap_no: str = ""            # SAP material number (assets with same SAP go to same tech)
     equipment_priority: int = 4   # P1/P2/P3/P4 for group sorting (P4 is default)
+    is_backlog: bool = False    # True when previously scheduled but not completed
 
 class PMEligibilityResult(NamedTuple):
     status: PMStatus
     reason: str
     priority_score: int = 0
     days_overdue: int = 0
+    is_backlog: bool = False  # True when previously scheduled but not completed
 
 class DateParser:
     """Responsible for parsing and standardizing dates"""
@@ -468,16 +470,20 @@ class PMEligibilityChecker:
         if pm_type == PMType.ANNUAL and not equipment.has_annual:
             return PMEligibilityResult(PMStatus.NOT_DUE, "Equipment doesn't require Annual PM")
 
-        # CRITICAL FIX #1: Check for uncompleted schedules from PREVIOUS weeks
-        # This prevents duplicate scheduling of equipment that's already scheduled but not completed
+        # Check for uncompleted schedules from PREVIOUS weeks — reschedule as BACKLOG (highest priority)
         uncompleted_schedules = self.completion_repo.get_uncompleted_schedules(
             equipment.bfm_no, pm_type, week_start
         )
         if uncompleted_schedules:
-            oldest_uncompleted = uncompleted_schedules[-1]  # Get the oldest one
+            weeks_in_backlog = len(uncompleted_schedules)
+            oldest = uncompleted_schedules[-1]
+            # Priority 1500–1999: above never-completed (900–1100) so backlog always leads the queue
+            backlog_priority = min(1500 + (weeks_in_backlog * 100), 1999)
             return PMEligibilityResult(
-                PMStatus.CONFLICTED,
-                f"Already scheduled for week {oldest_uncompleted['week_start']} (uncompleted) - assigned to {oldest_uncompleted['technician']}"
+                PMStatus.DUE,
+                f"BACKLOG: {weeks_in_backlog} week(s) unresolved (oldest: week of {oldest['week_start']})",
+                priority_score=backlog_priority,
+                is_backlog=True,
             )
 
         # WARNING: NEW: For Annual PMs, check if there's a Next Annual PM Date specified
@@ -496,13 +502,23 @@ class PMEligibilityChecker:
                 if next_annual_date:
                     days_until_next_annual = (next_annual_date - datetime.now()).days
 
-                    # If Next Annual PM Date is in the future and more than 7 days away, not due yet
-                    if days_until_next_annual > 7:
+                    # Schedule annual PMs up to 60 days before they are due so the weekly
+                    # scheduler always has a full queue (~24 annual PMs/wk for 1 200-unit fleet).
+                    if days_until_next_annual > 60:
                         return PMEligibilityResult(
                             PMStatus.NOT_DUE,
                             f"Annual PM scheduled for {next_annual_date.strftime('%Y-%m-%d')} ({days_until_next_annual} days from now)"
                         )
-                    # If within 7 days or past due based on Next Annual PM Date
+                    # Approaching within 60 days — schedule now, priority based on how soon
+                    elif days_until_next_annual > 7:
+                        # Closer to due date = higher score (200–377 range)
+                        priority = 200 + (60 - days_until_next_annual) * 3
+                        return PMEligibilityResult(
+                            PMStatus.DUE,
+                            f"Annual PM approaching in {days_until_next_annual} days (due: {next_annual_date.strftime('%Y-%m-%d')})",
+                            priority_score=priority,
+                        )
+                    # Within 7 days or past due
                     elif days_until_next_annual >= -30:  # Allow 30 days past due
                         priority = 500 + abs(min(days_until_next_annual, 0)) * 10
                         return PMEligibilityResult(
@@ -799,6 +815,7 @@ class PMAssignmentGenerator:
             'inactive': 0,
             'not_due': 0,
             'recently_completed': 0,
+            'backlog': 0,               # Scheduled but not completed in a previous week
             'conflicted_uncompleted': 0,
             'conflicted_cross_pm': 0,
             'conflicted_already_scheduled': 0,
@@ -842,10 +859,13 @@ class PMAssignmentGenerator:
                         weekly_result.priority_score,
                         weekly_result.reason,
                         sap_no=equipment.sap_no,
-                        equipment_priority=equipment.priority
+                        equipment_priority=equipment.priority,
+                        is_backlog=weekly_result.is_backlog,
                     ))
                     equipment_assigned = True
                     rejection_counts['due'] += 1
+                    if weekly_result.is_backlog:
+                        rejection_counts['backlog'] += 1
                 elif weekly_result.status == PMStatus.NOT_DUE:
                     rejection_counts['not_due'] += 1
                 elif weekly_result.status == PMStatus.RECENTLY_COMPLETED:
@@ -882,10 +902,13 @@ class PMAssignmentGenerator:
                             monthly_result.priority_score,
                             monthly_result.reason,
                             sap_no=equipment.sap_no,
-                            equipment_priority=equipment.priority
+                            equipment_priority=equipment.priority,
+                            is_backlog=monthly_result.is_backlog,
                         ))
                         equipment_assigned = True
                         rejection_counts['due'] += 1
+                        if monthly_result.is_backlog:
+                            rejection_counts['backlog'] += 1
                     elif monthly_result.status == PMStatus.NOT_DUE:
                         rejection_counts['not_due'] += 1
                     elif monthly_result.status == PMStatus.RECENTLY_COMPLETED:
@@ -926,10 +949,13 @@ class PMAssignmentGenerator:
                             six_month_result.priority_score,
                             six_month_result.reason,
                             sap_no=equipment.sap_no,
-                            equipment_priority=equipment.priority
+                            equipment_priority=equipment.priority,
+                            is_backlog=six_month_result.is_backlog,
                         ))
                         equipment_assigned = True
                         rejection_counts['due'] += 1
+                        if six_month_result.is_backlog:
+                            rejection_counts['backlog'] += 1
                     elif six_month_result.status == PMStatus.NOT_DUE:
                         rejection_counts['not_due'] += 1
                     elif six_month_result.status == PMStatus.RECENTLY_COMPLETED:
@@ -974,10 +1000,13 @@ class PMAssignmentGenerator:
                             annual_result.priority_score,
                             annual_result.reason,
                             sap_no=equipment.sap_no,
-                            equipment_priority=equipment.priority
+                            equipment_priority=equipment.priority,
+                            is_backlog=annual_result.is_backlog,
                         ))
                         equipment_assigned = True
                         rejection_counts['due'] += 1
+                        if annual_result.is_backlog:
+                            rejection_counts['backlog'] += 1
                     elif annual_result.status == PMStatus.NOT_DUE:
                         rejection_counts['not_due'] += 1
                     elif annual_result.status == PMStatus.RECENTLY_COMPLETED:
@@ -995,31 +1024,37 @@ class PMAssignmentGenerator:
         print(f"DEBUG: Finished processing all {total_equipment} equipment items")
         print(f"DEBUG: Found {len(potential_assignments)} potential assignments")
         print(f"DEBUG: === Eligibility Summary ===")
-        print(f"DEBUG:   Due (assigned):              {rejection_counts['due']}")
+        print(f"DEBUG:   Due — total:                 {rejection_counts['due']}")
+        print(f"DEBUG:     of which BACKLOG:          {rejection_counts['backlog']}")
         print(f"DEBUG:   Not due yet:                 {rejection_counts['not_due']}")
         print(f"DEBUG:   Recently completed:          {rejection_counts['recently_completed']}")
-        print(f"DEBUG:   Blocked by uncompleted sched:{rejection_counts['conflicted_uncompleted']}")
         print(f"DEBUG:   Blocked by cross-PM conflict:{rejection_counts['conflicted_cross_pm']}")
         print(f"DEBUG:   Already scheduled this week: {rejection_counts['conflicted_already_scheduled']}")
         print(f"DEBUG:   Other conflict:              {rejection_counts['conflicted_other']}")
         print(f"DEBUG:   Skipped (higher PM assigned):{rejection_counts['skipped_lower_pm']}")
         print(f"DEBUG:   Inactive equipment:          {rejection_counts['inactive']}")
 
-        # Sort: P1 (1) → P2 (2) → P3 (3) → P4 (4); within each tier, most-overdue first
-        print(f"DEBUG: Sorting assignments by priority (P1→P2→P3→P4, then by days overdue)...")
+        # Two-tier sort:
+        #   Tier 0 — BACKLOG (unresolved from prior weeks): P1→P4, then most-overdue first
+        #   Tier 1 — Active eligible PMs: P1→P4, then by last inspection date (highest score = longest ago)
+        print(f"DEBUG: Sorting: BACKLOG (P1→P4) first, then active eligible (P1→P4, last inspection)...")
         potential_assignments.sort(
             key=lambda x: (
-                equipment_priority_map.get(x.bfm_no, 4),  # P1=1, P2=2, P3=3, P4=4
-                -x.priority_score  # Within tier: higher score = more overdue = scheduled first
+                0 if x.is_backlog else 1,                   # Backlog block always leads
+                equipment_priority_map.get(x.bfm_no, 4),   # P1=1 … P4=4
+                -x.priority_score,                          # Higher score = longer since last inspection
             )
         )
 
         # Log priority breakdown
+        n_backlog = sum(1 for x in potential_assignments if x.is_backlog)
+        if n_backlog:
+            print(f"DEBUG:   BACKLOG: {n_backlog} PM(s) rescheduled from previous week(s)")
         for tier in (1, 2, 3, 4):
             n = sum(1 for x in potential_assignments
-                    if equipment_priority_map.get(x.bfm_no, 4) == tier)
+                    if not x.is_backlog and equipment_priority_map.get(x.bfm_no, 4) == tier)
             if n:
-                print(f"DEBUG:   P{tier}: {n} eligible PM(s)")
+                print(f"DEBUG:   P{tier} active: {n} eligible PM(s)")
 
         # Return all potential assignments (no hard slice here).
         # The SAP-group assignment logic in _assign_and_save() handles the soft weekly target,
