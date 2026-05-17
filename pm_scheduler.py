@@ -363,26 +363,29 @@ class PMEligibilityChecker:
                 if next_annual_date:
                     days_until_next_annual = (next_annual_date - datetime.now()).days
 
-                    if days_until_next_annual > 120:
+                    week_end = week_start + timedelta(days=7)
+                    if (next_annual_date - week_end).days > 0:
+                        days_from_now = (next_annual_date - datetime.now()).days
                         return PMEligibilityResult(
                             PMStatus.NOT_DUE,
-                            f"Annual PM scheduled for {next_annual_date.strftime('%Y-%m-%d')} ({days_until_next_annual} days from now)"
+                            f"Annual PM not due until {next_annual_date.strftime('%Y-%m-%d')} ({days_from_now} days from now)"
                         )
-                    elif days_until_next_annual > 7:
-                        # Approaching within 120 days — closer to due = higher score (200–424)
-                        priority = 200 + (120 - days_until_next_annual) * 2
+                    days_until_now = (next_annual_date - datetime.now()).days
+                    if days_until_now < 0:
+                        days_overdue = -days_until_now
+                        priority = min(500 + days_overdue * 10, 999)
                         return PMEligibilityResult(
                             PMStatus.DUE,
-                            f"Annual PM approaching in {days_until_next_annual} days (due: {next_annual_date.strftime('%Y-%m-%d')})",
+                            f"Annual PM OVERDUE by {days_overdue} days (due: {next_annual_date.strftime('%Y-%m-%d')})",
                             priority_score=priority,
+                            days_overdue=days_overdue,
                         )
-                    elif days_until_next_annual >= -30:
-                        priority = 500 + abs(min(days_until_next_annual, 0)) * 10
+                    else:
+                        priority = 300 + (7 - days_until_now) * 28
                         return PMEligibilityResult(
                             PMStatus.DUE,
-                            f"Annual PM due by Next Annual PM Date: {next_annual_date.strftime('%Y-%m-%d')}",
+                            f"Annual PM due this week: {next_annual_date.strftime('%Y-%m-%d')}",
                             priority_score=priority,
-                            days_overdue=abs(min(days_until_next_annual, 0))
                         )
 
         # Get recent completions

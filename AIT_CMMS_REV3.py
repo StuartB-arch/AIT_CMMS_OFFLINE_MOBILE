@@ -144,6 +144,8 @@ class Equipment:
     status: str
     priority: int = 4   # Default priority: P4 for assets not in P1/P2/P3 lists
     sap_no: str = ""    # SAP material number for group-based technician assignment
+    next_monthly_date: Optional[str] = None   # Authoritative next due date from spreadsheet
+    next_six_month_date: Optional[str] = None # Authoritative next due date from spreadsheet
 
 @dataclass
 class CompletionRecord:
@@ -500,35 +502,38 @@ class PMEligibilityChecker:
             if next_annual_str:
                 next_annual_date = self.date_parser.parse_flexible(next_annual_str)
                 if next_annual_date:
-                    days_until_next_annual = (next_annual_date - datetime.now()).days
+                    # Only schedule what is due THIS week (Mon–Sun) or already overdue.
+                    # "week_end" is the Sunday of the current scheduling week.
+                    week_end = week_start + timedelta(days=7)
+                    days_until_week_end = (next_annual_date - week_end).days
 
-                    # Schedule annual PMs up to 120 days before they are due so the weekly
-                    # scheduler always has a full queue.  With ~1 200 annual-PM units and a
-                    # 365-day cycle the fleet needs ~24 annual PMs/week; a 120-day window
-                    # exposes ~290 candidates so any reasonable weekly target can be filled.
-                    if days_until_next_annual > 120:
+                    if days_until_week_end > 0:
+                        # Due date is after this week — do not schedule yet
+                        days_from_now = (next_annual_date - datetime.now()).days
                         return PMEligibilityResult(
                             PMStatus.NOT_DUE,
-                            f"Annual PM scheduled for {next_annual_date.strftime('%Y-%m-%d')} ({days_until_next_annual} days from now)"
+                            f"Annual PM not due until {next_annual_date.strftime('%Y-%m-%d')} ({days_from_now} days from now)"
                         )
-                    # Approaching within 120 days — schedule now, priority based on how soon.
-                    # Formula: closer to due = higher score (200–424 range stays below 500
-                    # so overdue/within-7-day items always sort first).
-                    elif days_until_next_annual > 7:
-                        priority = 200 + (120 - days_until_next_annual) * 2
+
+                    # Due within this week or already overdue
+                    days_until_now = (next_annual_date - datetime.now()).days
+                    if days_until_now < 0:
+                        # Overdue: higher score the longer it's been overdue
+                        days_overdue = -days_until_now
+                        priority = min(500 + days_overdue * 10, 999)
                         return PMEligibilityResult(
                             PMStatus.DUE,
-                            f"Annual PM approaching in {days_until_next_annual} days (due: {next_annual_date.strftime('%Y-%m-%d')})",
+                            f"Annual PM OVERDUE by {days_overdue} days (due: {next_annual_date.strftime('%Y-%m-%d')})",
                             priority_score=priority,
+                            days_overdue=days_overdue,
                         )
-                    # Within 7 days or past due
-                    elif days_until_next_annual >= -30:  # Allow 30 days past due
-                        priority = 500 + abs(min(days_until_next_annual, 0)) * 10
+                    else:
+                        # Due within this week: soonest due = highest score
+                        priority = 300 + (7 - days_until_now) * 28
                         return PMEligibilityResult(
                             PMStatus.DUE,
-                            f"Annual PM due by Next Annual PM Date: {next_annual_date.strftime('%Y-%m-%d')}",
+                            f"Annual PM due this week: {next_annual_date.strftime('%Y-%m-%d')}",
                             priority_score=priority,
-                            days_overdue=abs(min(days_until_next_annual, 0))
                         )
 
 
@@ -624,7 +629,41 @@ class PMEligibilityChecker:
         if any(s['pm_type'] == pm_type.value for s in scheduled_pms):
             return PMEligibilityResult(PMStatus.CONFLICTED, f"Already scheduled for this week")
 
-        # Check if due based on equipment table dates
+        # For Monthly and Six Month PMs: use the authoritative next_*_pm date stored in the
+        # spreadsheet (loaded into the equipment table) to determine eligibility.
+        # Only schedule what is due within the current scheduling week or already overdue.
+        if pm_type in (PMType.MONTHLY, PMType.SIX_MONTH):
+            next_date_str = (equipment.next_monthly_date if pm_type == PMType.MONTHLY
+                             else equipment.next_six_month_date)
+            if next_date_str:
+                next_due = self.date_parser.parse_flexible(next_date_str)
+                if next_due:
+                    week_end = week_start + timedelta(days=7)
+                    if (next_due - week_end).days > 0:
+                        days_from_now = (next_due - datetime.now()).days
+                        return PMEligibilityResult(
+                            PMStatus.NOT_DUE,
+                            f"{pm_type.value} PM not due until {next_due.strftime('%Y-%m-%d')} ({days_from_now} days)"
+                        )
+                    days_until_now = (next_due - datetime.now()).days
+                    if days_until_now < 0:
+                        days_overdue = -days_until_now
+                        priority = min(500 + days_overdue * 10, 999)
+                        return PMEligibilityResult(
+                            PMStatus.DUE,
+                            f"{pm_type.value} PM OVERDUE by {days_overdue} days (due: {next_due.strftime('%Y-%m-%d')})",
+                            priority_score=priority,
+                            days_overdue=days_overdue,
+                        )
+                    else:
+                        priority = 300 + (7 - days_until_now) * 28
+                        return PMEligibilityResult(
+                            PMStatus.DUE,
+                            f"{pm_type.value} PM due this week: {next_due.strftime('%Y-%m-%d')}",
+                            priority_score=priority,
+                        )
+
+        # Fallback for equipment without a next_*_pm date: use last date + interval calculation
         return self._check_due_date(equipment, pm_type, recent_completions)
     
     def _get_minimum_interval(self, pm_type: PMType) -> int:
@@ -1280,10 +1319,12 @@ class PMSchedulingService:
         cursor = self.conn.cursor()
         cursor.execute('''
             SELECT bfm_equipment_no, sap_material_no, description, weekly_pm, monthly_pm, six_month_pm, annual_pm,
-                last_weekly_pm, last_monthly_pm, last_six_month_pm, last_annual_pm, COALESCE(status, 'Active') as status
+                last_weekly_pm, last_monthly_pm, last_six_month_pm, last_annual_pm, COALESCE(status, 'Active') as status,
+                next_monthly_pm, next_six_month_pm
             FROM (
                 SELECT bfm_equipment_no, sap_material_no, description, weekly_pm, monthly_pm, six_month_pm, annual_pm,
                     last_weekly_pm, last_monthly_pm, last_six_month_pm, last_annual_pm, status,
+                    next_monthly_pm, next_six_month_pm,
                     ROW_NUMBER() OVER (PARTITION BY bfm_equipment_no ORDER BY rowid) as rn
                 FROM equipment
                 WHERE (status = 'Active' OR status IS NULL)
@@ -1322,7 +1363,9 @@ class PMSchedulingService:
                 last_six_month_date=row[9],
                 last_annual_date=row[10],
                 status=row[11],
-                priority=priority
+                priority=priority,
+                next_monthly_date=row[12],
+                next_six_month_date=row[13],
             ))
 
         return equipment_list
