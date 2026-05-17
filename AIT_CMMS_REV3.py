@@ -10079,6 +10079,20 @@ class AITCMMSSystem:
             except Exception as e:
                 print(f"Note: Weekly PM column migration skipped: {e}")
 
+            # SCHEMA MIGRATION: Add next monthly/six-month PM columns to equipment table
+            try:
+                cursor.execute('''
+                    ALTER TABLE equipment
+                    ADD COLUMN IF NOT EXISTS next_monthly_pm TEXT
+                ''')
+                cursor.execute('''
+                    ALTER TABLE equipment
+                    ADD COLUMN IF NOT EXISTS next_six_month_pm TEXT
+                ''')
+                print("INFO: Next monthly/six-month PM columns migration applied")
+            except Exception as e:
+                print(f"Note: Next monthly/six-month PM column migration skipped: {e}")
+
             # Corrective Maintenance table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS corrective_maintenance (
